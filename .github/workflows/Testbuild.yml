@@ -1,0 +1,115 @@
+name: Build and Publish Docker Image
+
+on:
+  push:
+    branches:
+      - main  # Or any other branch you want to trigger the build from
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Create Dockerfile
+        run: |
+          cat <<'EOF' > Dockerfile
+          # BUILDER
+          FROM ubuntu:22.04
+          WORKDIR /builder
+          ARG TORCH_CUDA_ARCH_LIST="8.6+PTX"
+          ARG BUILD_EXTENSIONS=""
+          ARG APP_UID="6972"
+          ARG APP_GID="6972"
+
+          RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,rw \
+              apt update && \
+              apt install --no-install-recommends -y git vim build-essential python3-dev pip bash curl && \
+              rm -rf /var/lib/apt/lists/*
+          WORKDIR /home/app/
+          RUN git clone https://github.com/oobabooga/text-generation-webui.git 
+          WORKDIR /home/app/text-generation-webui
+          RUN GPU_CHOICE=A USE_CUDA118=FALSE LAUNCH_AFTER_INSTALL=FALSE INSTALL_EXTENSIONS=TRUE ./start_linux.sh --verbose
+          COPY CMD_FLAGS.txt /home/app/text-generation-webui/
+          EXPOSE 7860 5000 5005
+          WORKDIR /home/app/text-generation-webui
+          CMD umask 0002 && export HOME=/home/app/text-generation-webui && ./start_linux.sh --listen
+          EOF
+
+      - name: Create .env file
+        run: |
+          cat <<EOF > .env
+          TORCH_CUDA_ARCH_LIST=8.6+PTX
+          HOST_PORT=7860
+          CONTAINER_PORT=7860
+          HOST_API_PORT=5000
+          CONTAINER_API_PORT=5000
+          BUILD_EXTENSIONS=
+          APP_RUNTIME_GID=6972
+          TRANSFORMERS_CACHE=/home/app/text-generation-webui/cache/
+          HF_HOME=/home/app/text-generation-webui/cache/
+          EOF
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: yourusername/yourimagename:latest
+          build-args: |
+            TORCH_CUDA_ARCH_LIST=8.6+PTX
+            BUILD_EXTENSIONS=
+            APP_UID=6972
+            APP_GID=6972
+
+      - name: Create Docker Compose file
+        run: |
+          cat <<EOF > docker-compose.yml
+          version: "3.3"
+          services:
+            text-generation-webui:
+              build:
+                context: .
+                args:
+                  TORCH_CUDA_ARCH_LIST: "8.6+PTX"
+                  BUILD_EXTENSIONS: ""
+                  APP_GID: "6972"
+                  APP_UID: "6972"
+              env_file: .env
+              user: "6972:6972"
+              ports:
+                - "7860:7860"
+                - "5000:5000"
+              stdin_open: true
+              tty: true
+              volumes:
+                - ./cache:/home/app/text-generation-webui/cache
+                - ./characters:/home/app/text-generation-webui/characters
+                - ./extensions:/home/app/text-generation-webui/extensions
+                - ./loras:/home/app/text-generation-webui/loras
+                - ./logs:/home/app/text-generation-webui/logs
+                - ./models:/home/app/text-generation-webui/models
+                - ./presets:/home/app/text-generation-webui/presets
+                - ./prompts:/home/app/text-generation-webui/prompts
+                - ./softprompts:/home/app/text-generation-webui/softprompts
+                - ./training:/home/app/text-generation-webui/training
+                - ./cloudflared:/etc/cloudflared
+              deploy:
+                resources:
+                  reservations:
+                    devices:
+                      - driver: nvidia
+                        count: all
+                        capabilities: [gpu]
+          EOF
